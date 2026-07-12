@@ -1,7 +1,10 @@
-const fs=require('fs')
-const bencode=require('bencode')
-const tracker=require('tracker.js')
+import fs from 'fs'
+import bencode from 'bencode'
+import { getpeers } from './tracker.js'
 
-const torrent=bencode.decode(fs.readFileSync('Training Day (2001) 1080p.BluRay.torrent'))
+const torrent = bencode.decode(fs.readFileSync('Training Day (2001) 1080p.BluRay.torrent'))
 
+getpeers(torrent, (peers) => {
+  console.log(peers)
+})
 

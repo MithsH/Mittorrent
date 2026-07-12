@@ -1,74 +1,112 @@
-const dgram=require('dgram')
-const crypto=require('crypto')
-const torrentparser=require('.trackerparser.js')
-const generateID=require('./generateID')
+import dgram from 'dgram'
+import crypto from 'crypto'
+import { URL } from 'url'
+import {infoHash,size} from './trackerparser.js'
+import { genId } from './generateID.js'
+import { Buffer } from 'buffer'
 
 
 
 
 
-const Buffer=require('buffer').Buffer
-const urlparse=require('url')
 
+export const getpeers = (torrent, callback) => {
+    const trackers = []
+    
+    // Add primary announce URL
+    if (torrent.announce) {
+        trackers.push(Buffer.from(torrent.announce).toString('utf8'))
+    }
+    
+    // Add announce-list trackers (flatten the tiers)
+    if (torrent['announce-list']) {
+        torrent['announce-list'].forEach(tier => {
+            tier.forEach(url => {
+                const urlStr = Buffer.from(url).toString('utf8')
+                if (!trackers.includes(urlStr)) {
+                    trackers.push(urlStr)
+                }
+            })
+        })
+    }
+    
+    tryNextTracker(trackers, 0, torrent, callback)
+}
 
-module.exports.getpeers=(torrent,callback)=>{
-    const socket=dgram.createSocket('udp4')
-    const rawurl=torrent.announce.toString('utf8')
+function tryNextTracker(trackers, index, torrent, callback) {
+    if (index >= trackers.length) {
+        console.error('All trackers failed')
+        return
+    }
+    
+    const rawurl = trackers[index]
+    
+    const socket = dgram.createSocket('udp4')
 
+    // Bind the socket to listen for responses
+    socket.bind()
 
-    udpsend(socket,buildconnectmessage(),rawurl)
+    // Set a timeout in case the tracker doesn't respond
+    const timeout = setTimeout(() => {
+        socket.close()
+        tryNextTracker(trackers, index + 1, torrent, callback)
+    }, 5000)
 
-    socket.on('message',response=>{
-        if(restype(response)==='connect'){
-            const connectresp=parseconnectrequest(response)
+    udpsend(socket, buildconnectmessage(), rawurl)
 
-            const announcemessage=buildannouncemessage(connectresp.connectionID)
-            udpsend(socket,announcemessage,rawurl)
+    socket.on('message', response => {
+        const type = restype(response)
+        
+        if (type === 'connect') {
+            const connectresp = parseconnectrequest(response)
 
+            const announcemessage = buildannouncemessage(connectresp.connectionID, torrent)
+            udpsend(socket, announcemessage, rawurl)
 
         }
-        if(restype(response)=='announce'){
-            const announceresp=parseannouncerequest(response)
+        if (type == 'announce') {
+            const announceresp = parseannouncerequest(response)
 
-            
+            clearTimeout(timeout)
+            socket.close()
+            callback(announceresp.peers)
+
         }
 
     })
-    
 
+    socket.on('error', () => {
+        clearTimeout(timeout)
+        socket.close()
+        tryNextTracker(trackers, index + 1, torrent, callback)
+    })
 }
-
-   
-
-
 
 function udpsend(socket, message, rawUrl, callback=()=>{}){
-    const url=urlparse(rawUrl)
-    socket.send(message, 0, message.length, url.port, url.host, callback)
-    
-
-
-
-
+    const urlString = Buffer.isBuffer(rawUrl) ? rawUrl.toString('utf8') : rawUrl
+    const url = new URL(urlString)
+    socket.send(message, 0, message.length, url.port, url.hostname, callback)
 }
+
+
+
 
 
 function restype(resp){
     const action=resp.readUint32BE(0)
     if(action==0){return 'connect'}
     if(action==1){return 'announce'}
-
-
+    return undefined
 }
 
 function buildconnectmessage(){
-    const buff=Buffer.alloc(16)
-    buff.writeUint32BE(0x417,0)// connectionID
-    buff.writeUInt32BE(0x27101980,4)// second half of connection id
+    const buff = Buffer.alloc(16)
+    buff.writeBigUInt64BE(0x41727101980n, 0)// connectionID
     
-    buff.writeUInt32BE(0,8)//action 0-'connect'
     
-    crypto.randomBytes(4).copy(buff,12)//transactionID random
+    buff.writeUInt32BE(0, 8)//action 0-'connect'
+    
+    crypto.randomBytes(4).copy(buff, 12)//transactionID random
   
 
     return buff
@@ -77,40 +115,42 @@ function buildconnectmessage(){
 
 }
 
-function parseconnectrequest(connectresp){
+function parseconnectrequest(resp){
 
     return {
-        action : connectresp.readUint32BE(0),
-        connectionID : connectresp.readUint32BE(4),
-        transactionID : connectresp.readUint32BE(8)
+        action: resp.readUint32BE(0),
+        transactionID: resp.readUint32BE(4),
+        connectionID: resp.readBigUInt64BE(8)
     }
 
 }
 
-function buildannouncemessage(connectionID,port=6882){
-    const buff=Buffer.alloc(98)
+function buildannouncemessage(connectionID, torrent, port=6882){
+    const buff = Buffer.alloc(98)
 
-    connectionID.copy(buff,0)//connectionID
+    buff.writeBigUInt64BE(connectionID, 0)//connectionID
     
-    buff.writeUInt32BE(1,8)//action
+    buff.writeUInt32BE(1, 8)//action
 
-    crypto.randomBytes(4).copy(buff,12)//transactionID (random)
+    crypto.randomBytes(4).copy(buff, 12)//transactionID (random)
 
-    torrentparser.infohash(torrent).copy(buff,16)
+    infoHash(torrent).copy(buff, 16)
 
     
   
-    generateID.genId().copy(buff, 36); //peer
+    genId().copy(buff, 36); //peer
  
     Buffer.alloc(8).copy(buff, 56);// downloaded
   
-    torrentparser.size(torrent).copy(buff, 64);// left
+    size(torrent).copy(buff, 64);// left
 
     Buffer.alloc(8).copy(buff, 72);  // uploaded
   
-    buff.writeUInt32BE(0, 80);// event
+    buff.writeUint32BE(0, 80);// event
+
+    buff.writeUint32BE(0,84)//ip address -0 default
  
-    buff.writeUInt32BE(0, 80);
+
 
  
     crypto.randomBytes(4).copy(buff, 88);  // key
@@ -122,7 +162,7 @@ function buildannouncemessage(connectionID,port=6882){
     return buff;
 }
 
-function parseannouncerequest(announceresp){
+function parseannouncerequest(resp){
     function group(iterable, groupSize) {
     let groups = [];
     for (let i = 0; i < iterable.length; i += groupSize) {
@@ -138,7 +178,7 @@ function parseannouncerequest(announceresp){
         seeders: resp.readUInt32BE(12),
         peers: group(resp.slice(20), 6).map(address => {
       return {
-        ip: address.slice(0, 4).join('.'),
+        ip: address.slice(0, 4).map(b => b.toString()).join('.'),
         port: address.readUInt16BE(4)
       }
     })
